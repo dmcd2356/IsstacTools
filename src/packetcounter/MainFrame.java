@@ -29,61 +29,68 @@ public class MainFrame extends javax.swing.JFrame {
     public MainFrame() {
         initComponents();
 
+        // init to indicate we are not running yet
+        lastline = 0;
+        serverport = "";
+        serverpid = -1;
+        tsharkpid = -1;
+        counter = 0;
+        runpath = "";
+
         classProperties = new ClassProperties();
         
         this.standardOut = System.out;
         this.standardErr = System.err;         
 
-        elapsedTimer = new ElapsedTimer(this.elapsedTextField);
-        elapsedTimer.reset();
-        
+        // this timer is for measuring the elapsed time of the commands in msec
+        elapsedStart = -1;
+
+        // this timer is used as a timestamp reference for debug messages only.
+        // we start it when the program starts and never stop it.
+        tstampTimer = new ElapsedTimer(null);
+        tstampTimer.reset();
+        tstampTimer.start();
+
         // create debugger window
-        debug = new DebugMessage(statusTextPane, elapsedTimer);
-
-        runpath = "";
-        
-        // init config info
-        configInfo = new ConfigInfo();
-        setGUIFromConfig();
-
-        // init results fields
-        this.sentTextField.setText("0");
-        this.rcvdTextField.setText("0");
-        this.totalSentTextField.setText("0");
-        this.totalRcvdTextField.setText("0");
+        debug = new DebugMessage(statusTextPane, tstampTimer);
 
         // this creates a command launcher on a separate thread
         threadLauncher = new ThreadLauncher(null);
         threadLauncher.init(new StandardTermination());
 
         // this creates a command launcher that runs from the current thread
-        commandLauncher = new CommandLauncher();
+        // (this one will not produce any return information)
+        commandLauncher = new CommandLauncher(false);
 
-        // init to indicate we are not running yet
-        bRunning = false;
-        peakmem = 0;
-        bytesto = 0;
-        bytesfrom = 0;
-        lastline = 0;
+        // init results fields
+        resetStats();
 
         // init the start buttons to disabled until they have a corresponding command
         startCmd1Button.setEnabled(false);
         startCmd2Button.setEnabled(false);
         startCmd3Button.setEnabled(false);
         
+        // init config info
+        configInfo = new ConfigInfo();
+        setGUIFromConfig();
+
         // check if we previously loaded a config file
-        String lastConfig = classProperties.getPropertiesItem("LastConfigFile");
+        String lastConfig = classProperties.getPropertiesItem(ClassProperties.PropertyTags.LastConfigFile);
         if (lastConfig != null) {
             loadSettings (lastConfig);
         }
-        
+            
         // verify tshark has been installed
-        String[] command = { "tshark", "-v" };
-        int rc = commandLauncher.start(command, null);
+        String[] command2 = { "tshark", "-v" };
+        int rc = commandLauncher.start(command2, null);
         if (rc < 0) {
             JOptionPane.showMessageDialog(null,
-                "The tool 'tshark' is not installed." + newLine +
-                "You can install it by: sudo apt-get install tshark",
+                "The tool 'tshark' is not installed." + newLine + newLine +
+                "You can install it using:" + newLine +
+                "   sudo apt-get install tshark" + newLine + newLine +
+                "You will then have to add your user name to the wireshark group by entering:" + newLine +
+                "   sudo adduser $USER wireshark" + newLine + newLine +
+                "and then logging out and logging back in again.",
                 "Missing tool", JOptionPane.ERROR_MESSAGE);
         }
         else {
@@ -115,8 +122,10 @@ public class MainFrame extends javax.swing.JFrame {
         @Override
         public void jobstarted(ThreadLauncher.ThreadInfo threadInfo) {
             debug.print(DebugMessage.StatusType.JobStarted, "Job: " + threadInfo.jobname + " started - pid = " + threadInfo.pid);
-            // indicate tshark has started
-            bRunning = true;
+            if (threadInfo.jobname.equals("tshark")) {
+                // indicate tshark has started
+                tsharkpid = threadInfo.pid;
+            }
         }
         
         @Override
@@ -129,20 +138,65 @@ public class MainFrame extends javax.swing.JFrame {
             outputTextArea.setText(message);
 
             if (threadInfo.jobname.equals("pmap")) {
-//    if [[ "$result" != "" ]]; then
-//        RSS=$(echo $result | cut -d " " -f 4)
-//        if [[ ${RSS} -gt ${peakmem} ]]; then
-//            peakmem=${RSS}
-//        fi
-//    fi
+                if (message != null && !message.isEmpty()) {
+                    BufferedReader reader = new BufferedReader(new StringReader(message));
+                    int lineix;
+                    try {
+                        String line;
+                        for (lineix = 0; (line = reader.readLine()) != null; lineix++) {
+                            if (lineix < lastline) {
+                                continue;
+                            }
+                            
+                            if (line.startsWith("total kB")) {
+                                String[] words = line.trim().split("[ ]+");
+                                if (words.length > 3) {
+                                    int latestval = Integer.parseInt(words[3]);
+                                    peakmemTextField.setText(words[3]);
+                                    debug.print(DebugMessage.StatusType.Results, "peakmem = " + latestval);
+                                    if (peakmem < latestval) {
+                                        peakmem = latestval;
+                                        totalPeakmemTextField.setText(peakmem.toString());
+                                    }
+                                }
+                            }
+                        }
+                    } catch (IOException ex) {
+                        debug.print(DebugMessage.StatusType.Error, ex.getMessage());
+                    }
+                }
+
+                // now start the tshark again
+                startTshark();
             }
             else if (threadInfo.jobname.equals("tshark")) {
+                // update elapsed time
+                if (elapsedStart >= 0) {
+                    Long elapsedMsec = (System.nanoTime() - elapsedStart) / 1000000;
+                    debug.print(DebugMessage.StatusType.Info, "elapsed time = " + elapsedMsec + " ms");
+                    String elapsedField = "";
+                    if (elapsedMsec < 1000) {
+                        elapsedField = elapsedMsec + " ms";
+                    }
+                    else {
+                        Long elapsedSec = elapsedMsec / 1000;
+                        elapsedMsec %= 1000;
+                        elapsedField = "00" + elapsedMsec.toString();
+                        elapsedField = elapsedField.substring(elapsedField.length() - 3);
+                        elapsedField = elapsedSec + "." + elapsedField + " s";
+                    }
+                    elapsedTextField.setText(elapsedField);
+                    elapsedStart = -1;
+                }
+        
+                if (threadInfo.exitcode != 0) {
+                    // don't run if tshark can't access port
+                    debug.print(DebugMessage.StatusType.Error, "tshark failure: make sure you have added permission (must re-login after): sudo adduser $USER wireshark");
+                    return;
+                }
                 // parse tshark output
                 if (!message.isEmpty()) {
-//                    debug.print(DebugMessage.StatusType.Results, message);
-
                     // init current list entries to indicate no updates to any of them
-                    String serverPort = portTextField.getText();
                     boolean bStartFound = false;
                     BufferedReader reader = new BufferedReader(new StringReader(message));
                     int lineix;
@@ -194,7 +248,7 @@ public class MainFrame extends javax.swing.JFrame {
                             // get the latest results
                             Integer latestFrom;
                             Integer latestTo;
-                            if (portsrc.equals(serverPort)) {
+                            if (portsrc.equals(serverport)) {
                                 latestTo   = Integer.parseInt(bytercvd);
                                 latestFrom = Integer.parseInt(bytesent);
                             }
@@ -222,19 +276,45 @@ public class MainFrame extends javax.swing.JFrame {
                     }
                 }
 
-                // run peak mem command
-//                startPeakmem(pid);
-                
-                // now re-start tshark for next capture
-                startTshark();
+                // re-start the next command
+                if (serverpid >= 0)
+                    startPeakmem();
+                else
+                    startTshark();
             }
         }
     }
 
     /**
+     * resets all of the statistic parameters and GUI display
+     */
+    private void resetStats () {
+        // reset the timer
+        elapsedStart = -1;
+
+        // reset the peak memory and packet cumulative info
+        bytesfrom = 0;
+        bytesto = 0;
+        peakmem = 0;
+        
+        // reset the GUI
+        this.elapsedTextField.setText("0 ms");
+        this.sentTextField.setText("0");
+        this.rcvdTextField.setText("0");
+        this.peakmemTextField.setText("0");
+        this.totalSentTextField.setText("0");
+        this.totalRcvdTextField.setText("0");
+        this.totalPeakmemTextField.setText("0");
+    }
+    
+    /**
      * run tshark with the current selections
      */
     private void startTshark () {
+        if (tsharkpid >= 0) {
+            debug.print(DebugMessage.StatusType.Info, "tshark already running. pid = " + tsharkpid);
+            return;
+        }
         int verbose = 1;
         if (verboseCheckBox.isSelected())
             verbose = 2;
@@ -246,8 +326,7 @@ public class MainFrame extends javax.swing.JFrame {
         
         threadLauncher.init(new StandardTermination());
 
-        String port = this.portTextField.getText();
-        debug.print(DebugMessage.StatusType.Info, "Starting tshark capture of " + type + " packets on port " + port);
+        debug.print(DebugMessage.StatusType.Info, "Starting tshark capture of " + type + " packets on port " + serverport);
         switch (verbose) {
             default:
             case 0 :
@@ -256,7 +335,7 @@ public class MainFrame extends javax.swing.JFrame {
                                                "-p",
                                                "-q",
                                                "-i", "lo",
-                                               type + " port " + port
+                                               type + " port " + serverport
                                    };
                 threadLauncher.launch(command0, null, "tshark", null);
                 break;
@@ -266,7 +345,7 @@ public class MainFrame extends javax.swing.JFrame {
                 String[] command1 = { "tshark", "-z", "conv," + type,
                                                "-p",
                                                "-i", "lo",
-                                               type + " port " + port
+                                               type + " port " + serverport
                                    };
                 threadLauncher.launch(command1, null, "tshark", null);
                 break;
@@ -277,7 +356,7 @@ public class MainFrame extends javax.swing.JFrame {
                                                "-p",
                                                "-V",
                                                "-i", "lo",
-                                               type + " port " + port
+                                               type + " port " + serverport
                                    };
                 threadLauncher.launch(command2, null, "tshark", null);
                 break;
@@ -295,23 +374,21 @@ public class MainFrame extends javax.swing.JFrame {
         }
 
         // indicate tshark no longer running
-        bRunning = false;
+        tsharkpid = -1;
     }
 
     /**
      * run pmap to get the current peak memory usage for the given process
-     * 
-     * @param pid - the pid of the process to check
-     *              (this can be either the server or the client)
      */
-    private void startPeakmem (int pid) {
-        threadLauncher.init(new StandardTermination());
+    private void startPeakmem () {
+        if (serverpid >= 0) {
+            threadLauncher.init(new StandardTermination());
 
-        debug.print(DebugMessage.StatusType.Info, "pmap command in process");
-        String[] command = { "pmap", "-x", Integer.toString(pid),
-                                 "|", "tail", "-1"
-                            };
-        threadLauncher.launch(command, null, "pmap", null);
+            debug.print(DebugMessage.StatusType.Info, "pmap command in process on pid " + serverpid);
+            String[] command = { "pmap", "-x", Long.toString(serverpid)
+                                };
+            threadLauncher.launch(command, null, "pmap", null);
+        }
     }
     
     /**
@@ -321,18 +398,17 @@ public class MainFrame extends javax.swing.JFrame {
      */
     private void runCommand (String cmdstr) {
         // start the timer
-        elapsedTimer.start();
+        elapsedStart = System.nanoTime();
 
         // run the command
         String[] command = cmdstr.split(" ");
+        debug.print(DebugMessage.StatusType.Separator, "-");
+        debug.print(DebugMessage.StatusType.Info, "count: " + Integer.toString(++counter));
         debug.print(DebugMessage.StatusType.Info, "Starting command: " + cmdstr);
         int rc = commandLauncher.start(command, runpath);
         debug.print(DebugMessage.StatusType.Info, "returned: " + rc);
         //String result = commandLauncher.getResponse();
         //debug.print(DebugMessage.StatusType.Results, result);
-        
-        // stop the timer
-        elapsedTimer.stop();
         
         // terminate tshark to get results
         stopTshark();
@@ -342,12 +418,12 @@ public class MainFrame extends javax.swing.JFrame {
      * set the GUI from the config parameters
      */
     private void setGUIFromConfig () {
-        this.portTextField.setText(configInfo.getField("serverport"));
-        this.commandTextField1.setText(configInfo.getField("command1"));
-        this.commandTextField2.setText(configInfo.getField("command2"));
-        this.commandTextField3.setText(configInfo.getField("command3"));
+        this.portTextField.setText(configInfo.getField(ConfigInfo.ConfigTags.serverport));
+        this.commandTextField1.setText(configInfo.getField(ConfigInfo.ConfigTags.command1));
+        this.commandTextField2.setText(configInfo.getField(ConfigInfo.ConfigTags.command2));
+        this.commandTextField3.setText(configInfo.getField(ConfigInfo.ConfigTags.command3));
 
-        if (configInfo.getField("protocol").equals("TCP")) {
+        if (configInfo.getField(ConfigInfo.ConfigTags.protocol).equals("TCP")) {
             this.tcpRadioButton.setSelected(true);
             this.udpRadioButton.setSelected(false);
         }
@@ -356,33 +432,102 @@ public class MainFrame extends javax.swing.JFrame {
             this.udpRadioButton.setSelected(true);
         }
         
-        this.verboseCheckBox.setSelected(configInfo.getField("verbose").equals("ON"));
+        this.verboseCheckBox.setSelected(configInfo.getField(ConfigInfo.ConfigTags.verbose).equals("ON"));
         
         // enable the viable commands
         startCmd1Button.setEnabled(!this.commandTextField1.getText().isEmpty());
         startCmd2Button.setEnabled(!this.commandTextField2.getText().isEmpty());
         startCmd3Button.setEnabled(!this.commandTextField3.getText().isEmpty());
+
+        // set the port value that is used by other settings
+        serverport = this.portTextField.getText();
     }
     
     /**
      * set the config parameters from the GUI
      */
     private void setConfigFromGUI () {
-        configInfo.setField("serverport", this.portTextField.getText());
-        configInfo.setField("command1", this.commandTextField1.getText());
-        configInfo.setField("command2", this.commandTextField2.getText());
-        configInfo.setField("command3", this.commandTextField3.getText());
+        configInfo.setField(ConfigInfo.ConfigTags.serverport, this.portTextField.getText());
+        configInfo.setField(ConfigInfo.ConfigTags.command1, this.commandTextField1.getText());
+        configInfo.setField(ConfigInfo.ConfigTags.command2, this.commandTextField2.getText());
+        configInfo.setField(ConfigInfo.ConfigTags.command3, this.commandTextField3.getText());
 
         if (this.tcpRadioButton.isSelected())
-            configInfo.setField("protocol", "TCP");
+            configInfo.setField(ConfigInfo.ConfigTags.protocol, "TCP");
         else
-            configInfo.setField("protocol", "UDP");
+            configInfo.setField(ConfigInfo.ConfigTags.protocol, "UDP");
 
         if (this.verboseCheckBox.isSelected())
-            configInfo.setField("verbose", "ON");
+            configInfo.setField(ConfigInfo.ConfigTags.verbose, "ON");
         else
-            configInfo.setField("verbose", "OFF");
+            configInfo.setField(ConfigInfo.ConfigTags.verbose, "OFF");
     }
+
+    private void updateServerSelection () {
+        
+        // this creates a command launcher that runs from the current thread
+        // (this one will produce return information)
+        CommandLauncher launcher = new CommandLauncher(true);
+
+        // initialize the selection list to none
+        this.serverSelectComboBox.removeAllItems();
+        this.serverSelectComboBox.setEnabled(false);
+        
+        // create the list of server pids to select from
+        if (serverport.isEmpty()) {
+            return;
+        }
+        
+        String command1[] = { "lsof", "-i", ":" + serverport };
+        int rc = launcher.start(command1, null);
+        if (rc < 0) {
+            JOptionPane.showMessageDialog(null,
+                "The command 'lsof' returned error: " + rc,
+                "Command failure", JOptionPane.ERROR_MESSAGE);
+        }
+        else {
+            // copy the list of processes into the combobox selections
+            String results = launcher.getResponse();
+            BufferedReader reader = new BufferedReader(new StringReader(results));
+            try {
+                String line;
+                // read the list of running processes line by line
+                while ((line = reader.readLine()) != null) {
+                    String[] words = line.trim().split("[ ]+");
+                    // word[0] = process name, word[1] = pid
+                    // (skip the 1st entry that shows the column names & ignore this "ps" command)
+                    if (words.length >= 2 && !"PID".equals(words[1])) {
+                        String padding = "          ".substring(words[1].length());
+                        String entry = words[1] + padding + words[0];
+                        this.serverSelectComboBox.addItem(entry);
+                    }
+                }
+                // if we found at least 1 entry, select the 1st entry in list as default
+                if (serverSelectComboBox.getModel().getSize() > 0) {
+                    // get the user selection and set the pid value for the server
+                    serverSelectComboBox.setSelectedIndex(0);
+                    
+                    // now set the server pid to this selected value
+                    String entry = (String)serverSelectComboBox.getSelectedItem();
+                    if (entry != null) {
+                        int offset = entry.indexOf(' ');
+                        if (offset > 0) {
+                            serverpid = Integer.parseInt(entry.substring(0, offset));
+                        }
+                    }
+
+                    // if more than 1 process owns this port, show a selection
+                    if (serverSelectComboBox.getModel().getSize() > 1)
+                        this.serverSelectComboBox.setEnabled(true);
+                }
+                else {
+                    debug.print(DebugMessage.StatusType.Error, "No process listening on port " + serverport);
+                }
+            } catch (IOException ex) {
+                // ignore for now
+            }
+        }
+    }    
     
   /**
    * this searches the 'content' block for the specified 'tag' and
@@ -409,12 +554,6 @@ public class MainFrame extends javax.swing.JFrame {
      * @param fname - file to save settings to
      */
     private void saveSettings (String fname) {
-        // if file exists, delete it
-        File file = new File(fname);
-        if (file.isFile()) {
-            file.delete();
-        }
-
         // save the path to the config file as the execution path
         int offset = fname.lastIndexOf('/');
         if (offset >= 0)
@@ -425,6 +564,12 @@ public class MainFrame extends javax.swing.JFrame {
         
         // generate content from config settings
         String content = configInfo.publishAllTagFields();
+
+        // if file currently exists, delete it first
+        File file = new File(fname);
+        if (file.isFile()) {
+            file.delete();
+        }
 
         // write content to file
         try {
@@ -457,6 +602,9 @@ public class MainFrame extends javax.swing.JFrame {
                 
                 // execute settings
                 setGUIFromConfig();
+                
+                // set the server selection (based on the port selection)
+                updateServerSelection();
             } catch (IOException ex) {
                 debug.print(DebugMessage.StatusType.Error, ex.getMessage());
             }
@@ -490,6 +638,9 @@ public class MainFrame extends javax.swing.JFrame {
         totalRcvdTextField = new javax.swing.JTextField();
         jLabel8 = new javax.swing.JLabel();
         jLabel9 = new javax.swing.JLabel();
+        peakmemTextField = new javax.swing.JTextField();
+        totalPeakmemTextField = new javax.swing.JTextField();
+        jLabel11 = new javax.swing.JLabel();
         setupPanel = new javax.swing.JPanel();
         jLabel4 = new javax.swing.JLabel();
         jLabel5 = new javax.swing.JLabel();
@@ -504,6 +655,8 @@ public class MainFrame extends javax.swing.JFrame {
         udpRadioButton = new javax.swing.JRadioButton();
         loadSetupButton = new javax.swing.JButton();
         saveSetupButton = new javax.swing.JButton();
+        serverSelectComboBox = new javax.swing.JComboBox<>();
+        jLabel10 = new javax.swing.JLabel();
         outputTabbedPane = new javax.swing.JTabbedPane();
         statusScrollPane = new javax.swing.JScrollPane();
         statusTextPane = new javax.swing.JTextPane();
@@ -512,17 +665,22 @@ public class MainFrame extends javax.swing.JFrame {
 
         setDefaultCloseOperation(javax.swing.WindowConstants.EXIT_ON_CLOSE);
         setTitle("PacketCounter");
-        setMinimumSize(new java.awt.Dimension(840, 600));
+        setMinimumSize(new java.awt.Dimension(860, 600));
         setPreferredSize(new java.awt.Dimension(840, 600));
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            public void windowClosing(java.awt.event.WindowEvent evt) {
+                formWindowClosing(evt);
+            }
+        });
 
         interfacePanel.setMinimumSize(new java.awt.Dimension(816, 202));
 
         runPanel.setBorder(javax.swing.BorderFactory.createEtchedBorder());
         runPanel.setMinimumSize(new java.awt.Dimension(390, 200));
-        runPanel.setPreferredSize(new java.awt.Dimension(390, 200));
+        runPanel.setPreferredSize(new java.awt.Dimension(400, 200));
 
         elapsedTextField.setEditable(false);
-        elapsedTextField.setMinimumSize(new java.awt.Dimension(4, 21));
+        elapsedTextField.setMinimumSize(new java.awt.Dimension(100, 21));
         elapsedTextField.setPreferredSize(new java.awt.Dimension(100, 21));
 
         resetButton.setText("Reset");
@@ -584,15 +742,25 @@ public class MainFrame extends javax.swing.JFrame {
 
         totalSentTextField.setEditable(false);
         totalSentTextField.setMinimumSize(new java.awt.Dimension(80, 21));
-        totalSentTextField.setPreferredSize(new java.awt.Dimension(80, 21));
+        totalSentTextField.setPreferredSize(new java.awt.Dimension(100, 21));
 
         totalRcvdTextField.setEditable(false);
         totalRcvdTextField.setMinimumSize(new java.awt.Dimension(80, 21));
-        totalRcvdTextField.setPreferredSize(new java.awt.Dimension(80, 21));
+        totalRcvdTextField.setPreferredSize(new java.awt.Dimension(100, 21));
 
         jLabel8.setText("last");
 
-        jLabel9.setText("total");
+        jLabel9.setText("cumulative");
+
+        peakmemTextField.setEditable(false);
+        peakmemTextField.setMinimumSize(new java.awt.Dimension(80, 21));
+        peakmemTextField.setPreferredSize(new java.awt.Dimension(80, 21));
+
+        totalPeakmemTextField.setEditable(false);
+        totalPeakmemTextField.setMinimumSize(new java.awt.Dimension(80, 21));
+        totalPeakmemTextField.setPreferredSize(new java.awt.Dimension(100, 21));
+
+        jLabel11.setText("Peak mem:");
 
         javax.swing.GroupLayout runPanelLayout = new javax.swing.GroupLayout(runPanel);
         runPanel.setLayout(runPanelLayout);
@@ -611,19 +779,23 @@ public class MainFrame extends javax.swing.JFrame {
                         .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                             .addComponent(jLabel1)
                             .addComponent(jLabel3)
-                            .addComponent(jLabel2))
+                            .addComponent(jLabel2)
+                            .addComponent(jLabel11))
                         .addGap(6, 6, 6)
                         .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                            .addComponent(rcvdTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(elapsedTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(sentTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                            .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING, false)
+                                .addComponent(rcvdTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
+                                .addComponent(sentTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
+                                .addComponent(peakmemTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
+                                .addComponent(elapsedTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
                             .addComponent(jLabel8))
-                        .addGap(4, 12, Short.MAX_VALUE)
+                        .addGap(6, 6, 6)
                         .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                             .addComponent(jLabel9)
                             .addComponent(totalRcvdTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(totalSentTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))))
-                .addGap(18, 18, Short.MAX_VALUE)
+                            .addComponent(totalSentTextField, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                            .addComponent(totalPeakmemTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))))
+                .addGap(8, 8, 8)
                 .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addComponent(resetButton)
                     .addComponent(stopButton, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
@@ -632,28 +804,35 @@ public class MainFrame extends javax.swing.JFrame {
         runPanelLayout.setVerticalGroup(
             runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
             .addGroup(runPanelLayout.createSequentialGroup()
-                .addGap(14, 14, 14)
                 .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                    .addComponent(resetButton)
                     .addGroup(runPanelLayout.createSequentialGroup()
-                        .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(elapsedTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(jLabel1))
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                        .addGap(14, 14, 14)
+                        .addComponent(resetButton))
+                    .addGroup(runPanelLayout.createSequentialGroup()
+                        .addContainerGap()
                         .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                             .addComponent(jLabel8)
                             .addComponent(jLabel9))
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
                         .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(sentTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(jLabel2)
-                            .addComponent(totalSentTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
-                            .addComponent(rcvdTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                            .addComponent(jLabel3)
-                            .addComponent(totalRcvdTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 49, Short.MAX_VALUE)
+                            .addComponent(elapsedTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                            .addComponent(jLabel1))))
+                .addGap(15, 15, 15)
+                .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(sentTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                    .addComponent(jLabel2)
+                    .addComponent(totalSentTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
+                .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(rcvdTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                    .addComponent(jLabel3)
+                    .addComponent(totalRcvdTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
+                .addGap(12, 12, 12)
+                .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(peakmemTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                    .addComponent(totalPeakmemTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                    .addComponent(jLabel11))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
                 .addGroup(runPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                     .addComponent(startCmd1Button, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
                     .addComponent(stopButton, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
@@ -664,7 +843,7 @@ public class MainFrame extends javax.swing.JFrame {
 
         setupPanel.setBorder(javax.swing.BorderFactory.createEtchedBorder());
         setupPanel.setMinimumSize(new java.awt.Dimension(392, 200));
-        setupPanel.setPreferredSize(new java.awt.Dimension(392, 200));
+        setupPanel.setPreferredSize(new java.awt.Dimension(400, 200));
 
         jLabel4.setText("Server Port:");
 
@@ -683,6 +862,7 @@ public class MainFrame extends javax.swing.JFrame {
 
         tcpRadioButton.setSelected(true);
         tcpRadioButton.setText("TCP");
+        tcpRadioButton.setEnabled(false);
         tcpRadioButton.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(java.awt.event.ActionEvent evt) {
                 tcpRadioButtonActionPerformed(evt);
@@ -702,7 +882,7 @@ public class MainFrame extends javax.swing.JFrame {
 
         jLabel7.setText("Command 3:");
 
-        verboseCheckBox.setText("Verbose");
+        verboseCheckBox.setText("Verbose tshark");
 
         commandTextField3.addFocusListener(new java.awt.event.FocusAdapter() {
             public void focusLost(java.awt.event.FocusEvent evt) {
@@ -717,7 +897,19 @@ public class MainFrame extends javax.swing.JFrame {
 
         jLabel6.setText("Command 2:");
 
+        portTextField.addFocusListener(new java.awt.event.FocusAdapter() {
+            public void focusLost(java.awt.event.FocusEvent evt) {
+                portTextFieldFocusLost(evt);
+            }
+        });
+        portTextField.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                portTextFieldActionPerformed(evt);
+            }
+        });
+
         udpRadioButton.setText("UDP");
+        udpRadioButton.setEnabled(false);
         udpRadioButton.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(java.awt.event.ActionEvent evt) {
                 udpRadioButtonActionPerformed(evt);
@@ -738,6 +930,14 @@ public class MainFrame extends javax.swing.JFrame {
             }
         });
 
+        serverSelectComboBox.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                serverSelectComboBoxActionPerformed(evt);
+            }
+        });
+
+        jLabel10.setText("Server pid:");
+
         javax.swing.GroupLayout setupPanelLayout = new javax.swing.GroupLayout(setupPanel);
         setupPanel.setLayout(setupPanelLayout);
         setupPanelLayout.setHorizontalGroup(
@@ -746,34 +946,35 @@ public class MainFrame extends javax.swing.JFrame {
                 .addContainerGap()
                 .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addGroup(setupPanelLayout.createSequentialGroup()
-                        .addComponent(jLabel4)
+                        .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+                            .addComponent(jLabel5)
+                            .addComponent(jLabel6)
+                            .addComponent(jLabel7)
+                            .addComponent(jLabel10))
                         .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(portTextField, javax.swing.GroupLayout.PREFERRED_SIZE, 97, javax.swing.GroupLayout.PREFERRED_SIZE)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
-                        .addComponent(saveSetupButton)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(loadSetupButton))
-                    .addGroup(setupPanelLayout.createSequentialGroup()
-                        .addComponent(jLabel5)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(commandTextField1, javax.swing.GroupLayout.DEFAULT_SIZE, 266, Short.MAX_VALUE))
-                    .addGroup(setupPanelLayout.createSequentialGroup()
-                        .addComponent(jLabel6)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(commandTextField2))
-                    .addGroup(setupPanelLayout.createSequentialGroup()
-                        .addComponent(jLabel7)
-                        .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                        .addComponent(commandTextField3))
+                        .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
+                            .addComponent(commandTextField1)
+                            .addComponent(commandTextField2)
+                            .addComponent(commandTextField3)
+                            .addComponent(serverSelectComboBox, 0, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)))
                     .addGroup(setupPanelLayout.createSequentialGroup()
                         .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-                            .addComponent(udpRadioButton)
                             .addGroup(setupPanelLayout.createSequentialGroup()
                                 .addComponent(tcpRadioButton)
-                                .addGap(68, 68, 68)
-                                .addComponent(verboseCheckBox)))
-                        .addGap(0, 0, Short.MAX_VALUE)))
-                .addGap(12, 12, 12))
+                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
+                                .addComponent(udpRadioButton)
+                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
+                                .addComponent(verboseCheckBox))
+                            .addGroup(setupPanelLayout.createSequentialGroup()
+                                .addComponent(jLabel4)
+                                .addGap(13, 13, 13)
+                                .addComponent(portTextField, javax.swing.GroupLayout.PREFERRED_SIZE, 97, javax.swing.GroupLayout.PREFERRED_SIZE)
+                                .addGap(18, 18, 18)
+                                .addComponent(saveSetupButton)
+                                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
+                                .addComponent(loadSetupButton)))
+                        .addGap(0, 10, Short.MAX_VALUE)))
+                .addContainerGap())
         );
         setupPanelLayout.setVerticalGroup(
             setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
@@ -784,7 +985,11 @@ public class MainFrame extends javax.swing.JFrame {
                     .addComponent(portTextField, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
                     .addComponent(loadSetupButton)
                     .addComponent(saveSetupButton))
-                .addGap(18, 18, 18)
+                .addGap(7, 7, 7)
+                .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
+                    .addComponent(serverSelectComboBox, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
+                    .addComponent(jLabel10))
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
                 .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                     .addComponent(jLabel5)
                     .addComponent(commandTextField1, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
@@ -796,12 +1001,11 @@ public class MainFrame extends javax.swing.JFrame {
                 .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                     .addComponent(jLabel7)
                     .addComponent(commandTextField3, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 18, Short.MAX_VALUE)
+                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED, 22, Short.MAX_VALUE)
                 .addGroup(setupPanelLayout.createParallelGroup(javax.swing.GroupLayout.Alignment.BASELINE)
                     .addComponent(tcpRadioButton)
-                    .addComponent(verboseCheckBox))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                .addComponent(udpRadioButton)
+                    .addComponent(verboseCheckBox)
+                    .addComponent(udpRadioButton))
                 .addContainerGap())
         );
 
@@ -854,8 +1058,8 @@ public class MainFrame extends javax.swing.JFrame {
             .addGroup(layout.createSequentialGroup()
                 .addContainerGap()
                 .addComponent(interfacePanel, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.UNRELATED)
-                .addComponent(outputTabbedPane, javax.swing.GroupLayout.DEFAULT_SIZE, 232, Short.MAX_VALUE)
+                .addGap(36, 36, 36)
+                .addComponent(outputTabbedPane, javax.swing.GroupLayout.DEFAULT_SIZE, 208, Short.MAX_VALUE)
                 .addContainerGap())
         );
 
@@ -863,19 +1067,7 @@ public class MainFrame extends javax.swing.JFrame {
     }// </editor-fold>//GEN-END:initComponents
 
     private void resetButtonActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_resetButtonActionPerformed
-        // reset the timer
-        elapsedTimer.reset();
-
-        // reset the peak memory consumption
-        peakmem = 0;
-        
-        // reset the packet bytes info
-        bytesfrom = 0;
-        bytesto = 0;
-        this.sentTextField.setText("0");
-        this.rcvdTextField.setText("0");
-        this.totalSentTextField.setText("0");
-        this.totalRcvdTextField.setText("0");
+        resetStats();
     }//GEN-LAST:event_resetButtonActionPerformed
 
     private void startCmd1ButtonActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_startCmd1ButtonActionPerformed
@@ -883,7 +1075,8 @@ public class MainFrame extends javax.swing.JFrame {
     }//GEN-LAST:event_startCmd1ButtonActionPerformed
 
     private void stopButtonActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_stopButtonActionPerformed
-        stopTshark();
+        if (tsharkpid >= 0)
+            stopTshark();
     }//GEN-LAST:event_stopButtonActionPerformed
 
     private void tcpRadioButtonActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_tcpRadioButtonActionPerformed
@@ -943,7 +1136,7 @@ public class MainFrame extends javax.swing.JFrame {
             loadSettings(fname);
             
             // save as the last config file used
-            classProperties.setPropertiesItem("LastConfigFile", fname);
+            classProperties.setPropertiesItem(ClassProperties.PropertyTags.LastConfigFile, fname);
         }
     }//GEN-LAST:event_loadSetupButtonActionPerformed
 
@@ -984,9 +1177,76 @@ public class MainFrame extends javax.swing.JFrame {
             saveSettings(fname);
             
             // save as the last config file used
-            classProperties.setPropertiesItem("LastConfigFile", fname);
+            classProperties.setPropertiesItem(ClassProperties.PropertyTags.LastConfigFile, fname);
         }
     }//GEN-LAST:event_saveSetupButtonActionPerformed
+
+    private void serverSelectComboBoxActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_serverSelectComboBoxActionPerformed
+        // get the user selection and set the pid value for the server
+        String entry = (String)serverSelectComboBox.getSelectedItem();
+        if (entry != null) {
+            int offset = entry.indexOf(' ');
+            if (offset > 0) {
+                serverpid = Integer.parseInt(entry.substring(0, offset));
+            }
+        }
+    }//GEN-LAST:event_serverSelectComboBoxActionPerformed
+
+    private void formWindowClosing(java.awt.event.WindowEvent evt) {//GEN-FIRST:event_formWindowClosing
+        // if tshark is still running, stop it before exiting
+        if (tsharkpid >= 0)
+            stopTshark();
+    }//GEN-LAST:event_formWindowClosing
+
+    private void portTextFieldActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_portTextFieldActionPerformed
+        // make sure the user entered a valid numeric
+        String sport = portTextField.getText();
+        try {
+            int port = Integer.parseUnsignedInt(sport);
+            if (port > 65535) {
+                debug.print(DebugMessage.StatusType.Error, "Invalid port range");
+                portTextField.setText(serverport);
+                return;
+            }
+        }
+        catch (NumberFormatException ex) {
+            // invalid chars - restore previous entry
+            debug.print(DebugMessage.StatusType.Error, "Invalid port format");
+            portTextField.setText(serverport);
+            return;
+        }
+
+        // valid entry, update setting
+        serverport = sport;
+        
+        // set the server selection (based on the port selection)
+        updateServerSelection();
+    }//GEN-LAST:event_portTextFieldActionPerformed
+
+    private void portTextFieldFocusLost(java.awt.event.FocusEvent evt) {//GEN-FIRST:event_portTextFieldFocusLost
+        // make sure the user entered a valid numeric
+        String sport = portTextField.getText();
+        try {
+            int port = Integer.parseUnsignedInt(sport);
+            if (port > 65535) {
+                debug.print(DebugMessage.StatusType.Error, "Invalid port range");
+                portTextField.setText(serverport);
+                return;
+            }
+        }
+        catch (NumberFormatException ex) {
+            // invalid chars - restore previous entry
+            debug.print(DebugMessage.StatusType.Error, "Invalid port format");
+            portTextField.setText(serverport);
+            return;
+        }
+
+        // valid entry, update setting
+        serverport = sport;
+        
+        // set the server selection (based on the port selection)
+        updateServerSelection();
+    }//GEN-LAST:event_portTextFieldFocusLost
 
     /**
      * @param args the command line arguments
@@ -1023,11 +1283,15 @@ public class MainFrame extends javax.swing.JFrame {
         });
     }
 
-    private boolean  bRunning;
     private Integer  bytesto;
     private Integer  bytesfrom;
     private Integer  peakmem;
+    private String   serverport;
+    private long     serverpid;
+    private long     tsharkpid;
+    private long     elapsedStart;
     private int      lastline;
+    private int      counter;
     private String   runpath;
 
     private ClassProperties classProperties;
@@ -1035,7 +1299,7 @@ public class MainFrame extends javax.swing.JFrame {
     private final PrintStream     standardOut;
     private final PrintStream     standardErr; 
     private final DebugMessage    debug;
-    private final ElapsedTimer    elapsedTimer;
+    private final ElapsedTimer    tstampTimer;
     private final ThreadLauncher  threadLauncher;
     private final CommandLauncher commandLauncher;
     
@@ -1047,6 +1311,8 @@ public class MainFrame extends javax.swing.JFrame {
     private javax.swing.JTextField elapsedTextField;
     private javax.swing.JPanel interfacePanel;
     private javax.swing.JLabel jLabel1;
+    private javax.swing.JLabel jLabel10;
+    private javax.swing.JLabel jLabel11;
     private javax.swing.JLabel jLabel2;
     private javax.swing.JLabel jLabel3;
     private javax.swing.JLabel jLabel4;
@@ -1059,12 +1325,14 @@ public class MainFrame extends javax.swing.JFrame {
     private javax.swing.JScrollPane outputScrollPane;
     private javax.swing.JTabbedPane outputTabbedPane;
     private javax.swing.JTextArea outputTextArea;
+    private javax.swing.JTextField peakmemTextField;
     private javax.swing.JTextField portTextField;
     private javax.swing.JTextField rcvdTextField;
     private javax.swing.JButton resetButton;
     private javax.swing.JPanel runPanel;
     private javax.swing.JButton saveSetupButton;
     private javax.swing.JTextField sentTextField;
+    private javax.swing.JComboBox<String> serverSelectComboBox;
     private javax.swing.JPanel setupPanel;
     private javax.swing.JButton startCmd1Button;
     private javax.swing.JButton startCmd2Button;
@@ -1073,6 +1341,7 @@ public class MainFrame extends javax.swing.JFrame {
     private javax.swing.JTextPane statusTextPane;
     private javax.swing.JButton stopButton;
     private javax.swing.JRadioButton tcpRadioButton;
+    private javax.swing.JTextField totalPeakmemTextField;
     private javax.swing.JTextField totalRcvdTextField;
     private javax.swing.JTextField totalSentTextField;
     private javax.swing.JRadioButton udpRadioButton;

@@ -23,6 +23,10 @@ public class ClassProperties {
   
     private Properties props;
 
+    public enum PropertyTags {
+        LastConfigFile;
+    }
+
     ClassProperties() {
         props = new Properties();
         File propfile = new File(PROPERTIES_FILE);
@@ -66,10 +70,10 @@ public class ClassProperties {
         }
     }
 
-    public String getPropertiesItem (String tag) {
+    public String getPropertiesItem (PropertyTags tag) {
         String value = null;
         if (props != null) {
-            value = props.getProperty(tag);
+            value = props.getProperty(tag.toString());
             if (value != null && !value.isEmpty())
                 System.out.println("site.properties <" + tag + "> = " + value);
             else
@@ -79,7 +83,7 @@ public class ClassProperties {
         return (value == null) ? "" : value; // guarantee no null return
     }
   
-    public void setPropertiesItem (String tag, String value) {
+    public void setPropertiesItem (PropertyTags tag, String value) {
 
         // save changes to properties file
         // (currently the only parameter is the last configuration file loaded)
@@ -94,7 +98,7 @@ public class ClassProperties {
         }
         try {
             System.out.println("site.properties <" + tag + "> set to " + value);
-            props.setProperty(tag, value);
+            props.setProperty(tag.toString(), value);
             FileOutputStream out = new FileOutputStream(PROPERTIES_FILE);
             props.store(out, "---No Comment---");
             out.close();

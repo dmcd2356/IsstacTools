@@ -34,7 +34,8 @@ import javax.swing.Timer;
             enabled = true;
             elapsedSecs = 0;
             timestamp = "00:00";
-            elapsedLabel.setText(timestamp);
+            if (elapsedLabel != null)
+                elapsedLabel.setText(timestamp);
         }
         
         public void start () {
@@ -61,7 +62,8 @@ import javax.swing.Timer;
                 Integer mins = elapsedSecs / 60;
                 timestamp = ((mins < 10) ? "0" : "") + mins.toString() + ":" +
                             ((secs < 10) ? "0" : "") + secs.toString();
-                elapsedLabel.setText(timestamp);
+                if (elapsedLabel != null)
+                    elapsedLabel.setText(timestamp);
             }
         }
     }    

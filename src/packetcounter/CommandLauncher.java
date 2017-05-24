@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.lang.reflect.Field;
 import javax.swing.JTextArea;
 
 /**
@@ -18,16 +19,52 @@ import javax.swing.JTextArea;
  */
 public class CommandLauncher {
     private JTextArea response;
-    private final boolean redirect_stdout = false;
+    private boolean redirect_stdout = false;
+    private long pid;
     
-    public CommandLauncher () {
+    public CommandLauncher (boolean redirect) {
         this.response = null;
+        redirect_stdout = redirect;
+        this.pid = -1;
     }
     
     public String getResponse () {
         return response.getText();
     }
     
+    /**
+     * returns the pid of the current job
+     * 
+     * @return the PID of the current job thread
+     */
+    public long getJobPid() {
+        return pid;
+    }
+    
+    /**
+     * returns the pid of the current job
+     * 
+     * @return the PID of the current job thread
+     */
+    private synchronized long getPidOfProcess(Process proc) {
+        long procpid = -1;
+
+        if (proc == null || proc.getClass() == null)
+            return -1;
+        
+        try {
+            if (proc.getClass().getName().equals("java.lang.UNIXProcess")) {
+                Field f = proc.getClass().getDeclaredField("pid");
+                f.setAccessible(true);
+                procpid = f.getLong(proc);
+                f.setAccessible(false);
+            }
+        } catch (NoSuchFieldException | SecurityException | IllegalArgumentException | IllegalAccessException e) {
+            procpid = -1;
+        }
+        return procpid;
+    }
+
     /**
      * starts the specified command in the current thread.
      * 
@@ -41,6 +78,7 @@ public class CommandLauncher {
 
         // create an output area for stderr and stdout
         this.response = new JTextArea();
+        this.pid = -1;
 
         // build up the command and argument string
         ProcessBuilder builder = new ProcessBuilder(command);
@@ -71,6 +109,8 @@ public class CommandLauncher {
             return -1;
         }
 
+        // get the pid of the process
+        this.pid = getPidOfProcess(p);
         String status;
         BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
         while (p.isAlive()) {

@@ -159,6 +159,7 @@ public class RunnerThread extends Thread {
             System.out.println("Executing command: " + String.join(" ", command));
         proc = builder.start();
         pid = getPidOfProcess(proc);
+        System.out.println("pid = " + pid);
 
         // run the command
         String status;

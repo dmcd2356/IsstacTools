@@ -19,18 +19,19 @@ public class ConfigInfo {
     final static private String newLine = System.getProperty("line.separator");
     
     // the following have corresponding widgets in AnalyzerFrame
-    public String port;         // the server port
-    public String command1;     // command 1 to run
-    public String command2;     // command 2 to run
-    public String command3;     // command 3 to run
-    public String protocol;     // type (tcp, udp)
-    public String verbose;      // verbose (ON, OFF)
+    private String port;         // the server port
+    private String command1;     // command 1 to run
+    private String command2;     // command 2 to run
+    private String command3;     // command 3 to run
+    private String protocol;     // type (tcp, udp)
+    private String verbose;      // verbose (ON, OFF)
         
-    ConfigInfo ()  {
-        this(null);
+    public enum ConfigTags {
+        serverport, command1, command2, command3, protocol, verbose;
     }
-    
-    ConfigInfo (String name)  {
+
+    ConfigInfo ()  {
+        // set default values
         port     = "8080";
         command1 = "";
         command2 = "";
@@ -46,16 +47,16 @@ public class ConfigInfo {
      * 
      * @param tag   - the tag id of the parameter
      * @param value - the value to set the parameter to
-     * @return the corresponding value from the class (null if invalid selection)
+     * @return 0 if success, -1 if invalid selection
      */    
-    public int setField (String tag, String value) {
+    public int setField (ConfigTags tag, String value) {
         switch (tag) {
-        case "serverport":  this.port     = value;    break;
-        case "command1":    this.command1 = value;    break;
-        case "command2":    this.command2 = value;    break;
-        case "command3":    this.command3 = value;    break;
-        case "protocol":    this.protocol = value;    break;
-        case "verbose":     this.verbose  = value;    break;
+        case serverport:  this.port     = value;    break;
+        case command1:    this.command1 = value;    break;
+        case command2:    this.command2 = value;    break;
+        case command3:    this.command3 = value;    break;
+        case protocol:    this.protocol = value;    break;
+        case verbose:     this.verbose  = value;    break;
         default:
             return -1;
         }
@@ -69,14 +70,14 @@ public class ConfigInfo {
      * @param tag - the tag id of the parameter
      * @return the corresponding value from the class (null if invalid selection)
      */    
-    public String getField (String tag) {
+    public String getField (ConfigTags tag) {
         switch (tag) {
-        case "serverport":  return this.port;
-        case "command1":    return this.command1;
-        case "command2":    return this.command2;
-        case "command3":    return this.command3;
-        case "protocol":    return this.protocol;
-        case "verbose":     return this.verbose;
+        case serverport:  return this.port;
+        case command1:    return this.command1;
+        case command2:    return this.command2;
+        case command3:    return this.command3;
+        case protocol:    return this.protocol;
+        case verbose:     return this.verbose;
         default:
             return null;
         }
@@ -89,20 +90,28 @@ public class ConfigInfo {
      * @param tag - the config file tag to add
      * @return the entry to add to the config file
      */
-    private String addTagField (String tag) {
+    private String addTagField (ConfigTags tag) {
         int tagTabLength = 16;
         String field = getField (tag);
         if (field == null || field.isEmpty())
             return "";
         
-        int length = tagTabLength - 2 - tag.length();
+        int length = tagTabLength - 2 - tag.toString().length();
         length = (length > 0) ? length : 2;
         String spacing = new String(new char[length]).replace("\0", " ");
 
         return "<" + tag + ">" + spacing + field + newLine;
     }
-    
-    public String extractTagField (String content, String tag) {
+
+    /**
+     * reads a config file searching for the specified tag and returns its
+     * corresponding value if found.
+     * 
+     * @param content - the config file contents to search
+     * @param tag - the tag value to search for
+     * @return corresponding value of tag, empty field if tag not found
+     */
+    private String extractTagField (String content, ConfigTags tag) {
         // we're looking for the tag enclosed in <> at the begining of the line
         // followed by whitespace and the field value terminating on whitespace.
         String search = "^(<" + tag + ">)[ \t]+(.*)$"; //(\\S+)";
@@ -122,23 +131,33 @@ public class ConfigInfo {
         return entry;
     }
 
+    /**
+     * creates the content for a config file composed of all tag info.
+     * 
+     * @return the String containing the config file content produced
+     */
     public String publishAllTagFields () {
         String content = "";
-        content += addTagField ("serverport");
-        content += addTagField ("command1");
-        content += addTagField ("command2");
-        content += addTagField ("command3");
-        content += addTagField ("protocol");
-        content += addTagField ("verbose");
+        for (ConfigTags tag : ConfigTags.values()) {
+            content += addTagField (tag);
+        }
         return content;
     }
     
+    /**
+     * extracts the values for all tags found in the config file content passed
+     * and sets the current ConfigInfo fields to those values.
+     * 
+     * Note that this does not clear out any previous data from ConfigInfo
+     * prior to loading the new entries. The fields are simply overwritten.
+     * If the content does not contain all fields, those not found will retain
+     * their values prior to this call.
+     * 
+     * @param content - the content of the config file to process
+     */
     public void extractAllTagFields (String content) {
-        extractTagField (content, "serverport");
-        extractTagField (content, "command1");
-        extractTagField (content, "command2");
-        extractTagField (content, "command3");
-        extractTagField (content, "protocol");
-        extractTagField (content, "verbose");
+        for (ConfigTags tag : ConfigTags.values()) {
+            extractTagField (content, tag);
+        }
     }
 }

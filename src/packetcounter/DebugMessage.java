@@ -5,7 +5,6 @@
  */
 package packetcounter;
 
-import java.awt.Graphics;
 import javax.swing.JTextPane;
 import javax.swing.text.AttributeSet;
 
@@ -16,7 +15,7 @@ import javax.swing.text.AttributeSet;
 public class DebugMessage {
     
     public enum StatusType {
-        Info, Event, JobStarted, JobCompleted, Background, Warning, Error, Results;
+        Info, Event, JobStarted, JobCompleted, Background, Warning, Error, Results, Separator;
     }
 
     private static final String newLine = System.getProperty("line.separator");
@@ -75,8 +74,9 @@ public class DebugMessage {
             return;
         
         // if we were in the middle of processing a jar, terminate the record
+        String line = "";
         String tstamp = "";
-        if (type != StatusType.Results) {
+        if (type != StatusType.Results && type != StatusType.Separator) {
             tstamp += "[" + elapsedTimer.getElapsed() + "] ";
             appendToPane(debugTextPane, tstamp,
                         Util.TextColor.Brown, Util.FontType.Bold);
@@ -121,7 +121,6 @@ public class DebugMessage {
                 break;
 
             case Results:
-                String line;
                 int offset = message.indexOf(newLine);
                 while (offset >= 0) {
                     line = message.substring(0, offset);
@@ -131,6 +130,15 @@ public class DebugMessage {
                     appendToPane(debugTextPane, "        " + line + newLine,
                                 Util.TextColor.Violet, Util.FontType.Bold);
                 }
+                break;
+                
+            case Separator:
+                for (int ix = 0; ix < 60/message.length(); ix++)
+                    line += message;
+                if (line.length() < 60)
+                    line += message.substring(0, 60-line.length());
+                appendToPane(debugTextPane, line + newLine,
+                            Util.TextColor.Black, Util.FontType.Normal);
                 break;
         }
 
