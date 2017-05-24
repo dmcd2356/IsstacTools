@@ -137,150 +137,33 @@ public class MainFrame extends javax.swing.JFrame {
             String message = threadInfo.stdout.getText();
             outputTextArea.setText(message);
 
-            if (threadInfo.jobname.equals("pmap")) {
-                if (message != null && !message.isEmpty()) {
-                    BufferedReader reader = new BufferedReader(new StringReader(message));
-                    int lineix;
-                    try {
-                        String line;
-                        for (lineix = 0; (line = reader.readLine()) != null; lineix++) {
-                            if (lineix < lastline) {
-                                continue;
-                            }
-                            
-                            if (line.startsWith("total kB")) {
-                                String[] words = line.trim().split("[ ]+");
-                                if (words.length > 3) {
-                                    int latestval = Integer.parseInt(words[3]);
-                                    peakmemTextField.setText(words[3]);
-                                    debug.print(DebugMessage.StatusType.Results, "peakmem = " + latestval);
-                                    if (peakmem < latestval) {
-                                        peakmem = latestval;
-                                        totalPeakmemTextField.setText(peakmem.toString());
-                                    }
-                                }
-                            }
-                        }
-                    } catch (IOException ex) {
-                        debug.print(DebugMessage.StatusType.Error, ex.getMessage());
-                    }
-                }
-
-                // now start the tshark again
-                startTshark();
-            }
-            else if (threadInfo.jobname.equals("tshark")) {
-                // update elapsed time
-                if (elapsedStart >= 0) {
-                    Long elapsedMsec = (System.nanoTime() - elapsedStart) / 1000000;
-                    debug.print(DebugMessage.StatusType.Info, "elapsed time = " + elapsedMsec + " ms");
-                    String elapsedField = "";
-                    if (elapsedMsec < 1000) {
-                        elapsedField = elapsedMsec + " ms";
-                    }
-                    else {
-                        Long elapsedSec = elapsedMsec / 1000;
-                        elapsedMsec %= 1000;
-                        elapsedField = "00" + elapsedMsec.toString();
-                        elapsedField = elapsedField.substring(elapsedField.length() - 3);
-                        elapsedField = elapsedSec + "." + elapsedField + " s";
-                    }
-                    elapsedTextField.setText(elapsedField);
-                    elapsedStart = -1;
-                }
-        
-                if (threadInfo.exitcode != 0) {
-                    // don't run if tshark can't access port
-                    debug.print(DebugMessage.StatusType.Error, "tshark failure: make sure you have added permission (must re-login after): sudo adduser $USER wireshark");
-                    return;
-                }
-                // parse tshark output
-                if (!message.isEmpty()) {
-                    // init current list entries to indicate no updates to any of them
-                    boolean bStartFound = false;
-                    BufferedReader reader = new BufferedReader(new StringReader(message));
-                    int lineix;
-                    try {
-                        String line;
-                        for (lineix = 0; (line = reader.readLine()) != null; lineix++) {
-                            // since we are concatenating each read (so we have a history
-                            // of the previous captures) we save the last line number read
-                            // every time this is executed, and we skip all the lines
-                            // previously read so we only start with the new data.
-                            if (lineix < lastline) {
-                                continue;
-                            }
-                            // skip all data until we get to the summary info
-                            String type = "UDP";
-                            if (tcpRadioButton.isSelected())
-                                type = "TCP";
-                            if (line.startsWith(type + " Conversations")) {
-                                bStartFound = true;
-                                continue;
-                            }
-                            else if (!bStartFound) {
-                                continue;
-                            }
-                            debug.print(DebugMessage.StatusType.Results, line);
-                        
-                            String[] words = line.trim().split("[ ]+");
-                            if (words.length != 11)
-                                continue; // invalid entry
-
-                            String portsrc = words[0];
-                            String portdst = words[2];
-                            //String pktsrcvd = words[3];
-                            String bytercvd = words[4];
-                            //String pktssent = words[5];
-                            String bytesent = words[6];
-                            //String pktstotal = words[7];
-                            //String bytetotal = words[8];
-
-                            if (!portsrc.startsWith("127.0.0.1") || !portdst.startsWith("127.0.0.1"))
-                                continue;
-                            int offset = portsrc.indexOf(":");
-                            if (offset >= 0)
-                                portsrc = portsrc.substring(offset+1);
-                            //offset = portdst.indexOf(":");
-                            //if (offset >= 0)
-                            //    portdst = portdst.substring(offset+1);
-
-                            // get the latest results
-                            Integer latestFrom;
-                            Integer latestTo;
-                            if (portsrc.equals(serverport)) {
-                                latestTo   = Integer.parseInt(bytercvd);
-                                latestFrom = Integer.parseInt(bytesent);
-                            }
-                            else {
-                                latestFrom = Integer.parseInt(bytercvd);
-                                latestTo   = Integer.parseInt(bytesent);
-                            }
-                        
-                            // keep track of the cumulative amount
-                            bytesfrom += latestFrom;
-                            bytesto   += latestTo;
-
-                            // display the results
-                            sentTextField.setText(latestTo.toString());
-                            rcvdTextField.setText(latestFrom.toString());
-                            totalSentTextField.setText(bytesto.toString());
-                            totalRcvdTextField.setText(bytesfrom.toString());
-                        }
-                    
-                        // save last line read to skip on next pass
-                        lastline = lineix;
-                    
-                    } catch (IOException ex) {
-                        debug.print(DebugMessage.StatusType.Error, ex.getMessage());
-                    }
-                }
-
-                // re-start the next command
-                if (serverpid >= 0)
-                    startPeakmem();
-                else
+            try {
+                if (threadInfo.jobname.equals("pmap")) {
+                    // read and display the response
+                    readPeakmem(message);
+                
+                    // now start the tshark again
                     startTshark();
+                }
+                else if (threadInfo.jobname.equals("tshark")) {
+                    // check for tshark error
+                    if (threadInfo.exitcode != 0) {
+                        debug.print(DebugMessage.StatusType.Error,
+                            "tshark failure: make sure you have added permission (must re-login after): sudo adduser $USER wireshark");
+                        return;
+                    }
+
+                    // read and display the response
+                    readTshark(message);
+                    
+                    // re-start the next command (run peakmem if we have a valid pid)
+                    if (serverpid >= 0)
+                        startPeakmem();
+                    else
+                        startTshark();
+                }
+            } catch (IOException ex) {
+                debug.print(DebugMessage.StatusType.Error, ex.getMessage());
             }
         }
     }
@@ -364,6 +247,9 @@ public class MainFrame extends javax.swing.JFrame {
         debug.print(DebugMessage.StatusType.Info, "tshark command in process");
     }
 
+    /**
+     * stops the tshark command so we can get its current measurement info.
+     */
     private void stopTshark () {
         // if tshark is running, stop it
         ThreadLauncher.ThreadInfo threadInfo = threadLauncher.stopAll();
@@ -378,6 +264,90 @@ public class MainFrame extends javax.swing.JFrame {
     }
 
     /**
+     * parses the response of the tshark command to extract the bytes of data
+     * sent to/rcvd from the server.
+     * 
+     * @param message - the command response string
+     * @throws IOException 
+     */
+    private void readTshark (String message) throws IOException {
+        if (message == null || message.isEmpty())
+            return;
+        
+        // parse tshark output
+        // init current list entries to indicate no updates to any of them
+        boolean bStartFound = false;
+        BufferedReader reader = new BufferedReader(new StringReader(message));
+        int lineix;
+        String line;
+        for (lineix = 0; (line = reader.readLine()) != null; lineix++) {
+            // since we are concatenating each read (so we have a history
+            // of the previous captures) we save the last line number read
+            // every time this is executed, and we skip all the lines
+            // previously read so we only start with the new data.
+            if (lineix < lastline) {
+                continue;
+            }
+            // skip all data until we get to the summary info
+            String type = "UDP";
+            if (tcpRadioButton.isSelected())
+                type = "TCP";
+            if (line.startsWith(type + " Conversations")) {
+                bStartFound = true;
+                continue;
+            }
+            else if (!bStartFound) {
+                continue;
+            }
+            debug.print(DebugMessage.StatusType.Results, line);
+                        
+            String[] words = line.trim().split("[ ]+");
+            if (words.length != 11)
+                continue; // invalid entry
+
+            String portsrc = words[0];
+            String portdst = words[2];
+            //String pktsrcvd = words[3];
+            String bytercvd = words[4];
+            //String pktssent = words[5];
+            String bytesent = words[6];
+            //String pktstotal = words[7];
+            //String bytetotal = words[8];
+
+            if (!portsrc.startsWith("127.0.0.1") || !portdst.startsWith("127.0.0.1"))
+                continue;
+            int offset = portsrc.indexOf(":");
+            if (offset >= 0)
+                portsrc = portsrc.substring(offset+1);
+
+            // get the latest results
+            Integer latestFrom;
+            Integer latestTo;
+            if (portsrc.equals(serverport)) {
+                latestTo   = Integer.parseInt(bytercvd);
+                latestFrom = Integer.parseInt(bytesent);
+            }
+            else {
+                latestFrom = Integer.parseInt(bytercvd);
+                latestTo   = Integer.parseInt(bytesent);
+            }
+                        
+            // keep track of the cumulative amount
+            bytesfrom += latestFrom;
+            bytesto   += latestTo;
+
+            // display the results
+            sentTextField.setText(latestTo.toString());
+            rcvdTextField.setText(latestFrom.toString());
+            totalSentTextField.setText(bytesto.toString());
+            totalRcvdTextField.setText(bytesfrom.toString());
+        }
+                    
+        // save last line read to skip on next pass
+        lastline = lineix;
+    }
+    
+    /**
      * run pmap to get the current peak memory usage for the given process
      */
     private void startPeakmem () {
@@ -390,6 +360,77 @@ public class MainFrame extends javax.swing.JFrame {
             threadLauncher.launch(command, null, "pmap", null);
         }
     }
+
+    /**
+     * parses the response of the pmap command to extract the memory used
+     * by the server.
+     * 
+     * @param message - the command response string
+     * @throws IOException 
+     */
+    private void readPeakmem (String message) throws IOException {
+        if (message == null || message.isEmpty())
+            return;
+        
+        BufferedReader reader = new BufferedReader(new StringReader(message));
+        int lineix;
+        String line;
+        for (lineix = 0; (line = reader.readLine()) != null; lineix++) {
+            // since we are concatenating each read (so we have a history
+            // of the previous captures) we save the last line number read
+            // every time this is executed, and we skip all the lines
+            // previously read so we only start with the new data.
+            if (lineix < lastline) {
+                continue;
+            }
+                            
+            if (line.startsWith("total kB")) {
+                String[] words = line.trim().split("[ ]+");
+                if (words.length > 3) {
+                    int latestval = Integer.parseInt(words[3]);
+                    peakmemTextField.setText(words[3]);
+                    debug.print(DebugMessage.StatusType.Results, "peakmem = " + latestval);
+                    if (peakmem < latestval) {
+                        peakmem = latestval;
+                        totalPeakmemTextField.setText(peakmem.toString());
+                    }
+                }
+            }
+        }
+                    
+        // save last line read to skip on next pass
+        lastline = lineix;
+    }
+
+    /**
+     * get timestamp of when to measure elapes time
+     */
+    private void startElapsed () {
+        elapsedStart = System.nanoTime();
+    }
+    
+    /*
+    * determine time elapsed from last startElapsed call and display results
+    */
+    private void readElapsed () {
+        if (elapsedStart >= 0) {
+            Long elapsedMsec = (System.nanoTime() - elapsedStart) / 1000000;
+            debug.print(DebugMessage.StatusType.Info, "elapsed time = " + elapsedMsec + " ms");
+            String elapsedField = "";
+            if (elapsedMsec < 1000) {
+                elapsedField = elapsedMsec + " ms";
+            }
+            else {
+                Long elapsedSec = elapsedMsec / 1000;
+                elapsedMsec %= 1000;
+                elapsedField = "00" + elapsedMsec.toString();
+                elapsedField = elapsedField.substring(elapsedField.length() - 3);
+                elapsedField = elapsedSec + "." + elapsedField + " s";
+            }
+            elapsedTextField.setText(elapsedField);
+            elapsedStart = -1;
+        }
+    }
     
     /**
      * run the selected user command and begin capture of stats for it
@@ -397,8 +438,8 @@ public class MainFrame extends javax.swing.JFrame {
      * @param cmdstr - the user command to run
      */
     private void runCommand (String cmdstr) {
-        // start the timer
-        elapsedStart = System.nanoTime();
+        // start the command timer
+        startElapsed();
 
         // run the command
         String[] command = cmdstr.split(" ");
@@ -409,7 +450,10 @@ public class MainFrame extends javax.swing.JFrame {
         debug.print(DebugMessage.StatusType.Info, "returned: " + rc);
         //String result = commandLauncher.getResponse();
         //debug.print(DebugMessage.StatusType.Results, result);
-        
+
+        // get the elapsed time of the command
+        readElapsed();
+                    
         // terminate tshark to get results
         stopTshark();
     }
