@@ -35,16 +35,14 @@ class ThreadLauncher {
         public Long       pid;        // the PID for the job
         public int        jobid;      // the job id
         public String     jobname;    // type of job being run
-        public String     fname;      // filename being processed
         public JTextArea  stdout;     // text widget to output stdout & stderr to
         
-        ThreadInfo (String[] command, String workdir, JTextArea  stdout, String jobname, String fname) {
+        ThreadInfo (String[] command, String workdir, String jobname) {
             this.command   = command;
             this.workingdir = workdir;
-            this.stdout    = stdout;
+            this.stdout    = new JTextArea(); // create a new area to save stdout of command in
             this.jobid     = ++jobnumber;
             this.jobname   = jobname;
-            this.fname     = (fname == null) ? "" : fname;
             this.exitcode  = -1;
             this.pid       = -1L;
         }
@@ -53,14 +51,12 @@ class ThreadLauncher {
     // Queue for commands to execute in separate thread
     private RunnerThread runner;
     private ThreadAction action;
-    private JTextArea    outTextArea;
     private final Queue<ThreadInfo> commandQueue = new LinkedList<>();
     private final Timer timer;
     private static int jobnumber;
     
-    public ThreadLauncher (JTextArea  stdout) {
+    public ThreadLauncher () {
         this.action = null; // init to no action when thread completes
-        this.outTextArea = stdout;
 
         // start the timer to run every 100 msec with no delay
         this.timer = new Timer(100, new TimerListener());
@@ -79,15 +75,10 @@ class ThreadLauncher {
 //        return launch (command, workdir, jobname, "");
 //    }
 
-    public int launch (String[] command, String workdir, String jobname, String fname) {
+    public int launch (String[] command, String workdir, String jobname) {
         
-        // if an output text area was not supplied, create one to capture the output
-        // create an output area and add the command to the queue
-        if (this.outTextArea == null)
-            this.outTextArea = new JTextArea();
-
         // add the command to the queue
-        ThreadInfo commandInfo = new ThreadInfo(command, workdir, this.outTextArea, jobname, fname);
+        ThreadInfo commandInfo = new ThreadInfo(command, workdir, jobname);
         this.commandQueue.add(commandInfo);
 
         // make sure the timer is running

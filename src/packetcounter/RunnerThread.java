@@ -19,10 +19,10 @@ import javax.swing.JTextArea;
  */
 public class RunnerThread extends Thread {
 
-    private JTextArea stdout;    // text widget to output stdout & stderr to
-    private String[] command;           // the command to execute
-    private String workingdir;          // the dir to run the command from
-    private ThreadLauncher.ThreadInfo commandInfo; // additional information about the job
+    private final JTextArea stdout;    // text widget to output stdout & stderr to
+    private final String[] command;    // the command to execute
+    private final String workingdir;   // the dir to run the command from
+    private final ThreadLauncher.ThreadInfo commandInfo; // additional information about the job
     private Process proc;
     private int exitcode;
     private long pid;
